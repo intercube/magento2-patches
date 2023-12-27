@@ -1,0 +1,175 @@
+diff --git a/src/view/frontend/templates/script/sentry.phtml b/src/view/frontend/templates/script/sentry.phtml
+index 50575c3..b5b8adb 100755
+--- a/src/view/frontend/templates/script/sentry.phtml
++++ b/src/view/frontend/templates/script/sentry.phtml
+@@ -1,23 +1,84 @@
+ <?php
+ // phpcs:disable Magento2.Templates.ThisInTemplate.FoundThis
+-/** @var Escaper $escaper */
+-/** @var SentryScript $block */
+-
+-use JustBetter\Sentry\Block\SentryScript;
+-use Magento\Framework\Escaper;
+
++/** @var \JustBetter\Sentry\Block\SentryScript $block */
+ if (!$block->canUseScriptTag($block->getNameInLayout())) {
+     return;
+ }
++
++$bundleFile = 'bundle';
++
++if ($block->isTracingEnabled()) {
++    $bundleFile .= '.tracing';
++}
++
++if ($block->useSessionReplay()) {
++    $bundleFile .= '.replay';
++}
++
++$bundleFile .= '.min.js';
++
++$remoteFile = sprintf(
++    'https://browser.sentry-cdn.com/%s/%s',
++    $block->escapeHtmlAttr($block->getJsSdkVersion()),
++    $bundleFile
++);
+ ?>
+-<script src="https://browser.sentry-cdn.com/<?= SentryScript::CURRENT_VERSION;?>/bundle.min.js"
+-        crossorigin="anonymous">
+-</script>
++
++<script src="https://cdn.polyfill.io/v2/polyfill.min.js?features=Promise" crossorigin></script>
++<script src="<?= /** @noEscape */$remoteFile ?>" crossorigin="anonymous"></script>
+ <script>
+     Sentry.init({
+-        dsn: '<?= $escaper->escapeUrl(trim($block->getDSN())) ?>',
+-        release: '<?= $escaper->escapeHtml(trim($block->getVersion())) ?>',
+-        environment: '<?= $escaper->escapeHtml(trim($block->getEnvironment())) ?>',
++        dsn: '<?= $block->escapeUrl(trim($block->getDSN())) ?>',
++        release: '<?= $block->escapeHtml(trim($block->getVersion())) ?>',
++        environment: '<?= $block->escapeHtml(trim($block->getEnvironment())) ?>',
++        integrations: [
++            <?php if ($block->isTracingEnabled()): ?>
++                new Sentry.BrowserTracing(),
++            <?php endif ?>
++            <?php if ($block->useSessionReplay()): ?>
++            new Sentry.Replay({
++                blockAllMedia: <?= $block->escapeHtml($block->getReplayBlockMedia() ? 'true' : 'false') ?>,
++                maskAllText: <?= $block->escapeHtml($block->getReplayMaskText() ? 'true' : 'false') ?>,
++            })
++            <?php endif ?>
++        ],
++        <?php if ($block->isTracingEnabled()): ?>
++        tracesSampleRate: <?= $block->escapeHtml($block->getTracingSampleRate()) ?>,
++        <?php endif ?>
++        <?php if ($block->useSessionReplay()): ?>
++        replaysSessionSampleRate: <?= $block->escapeHtml($block->getReplaySessionSampleRate()) ?>,
++        replaysOnErrorSampleRate: <?= $block->escapeHtml($block->getReplayErrorSampleRate()) ?>,
++        <?php endif ?>
++        ignoreErrors: <?= /** @noEscape */ $block->getIgnoreJsErrors() ?>,
++        <?php if ($block->stripStaticContentVersion() || $block->stripStoreCode()): ?>
++        beforeSend: function(event) {
++            event.exception.values.map(function (value) {
++                if (value.stacktrace === undefined || ! value.stacktrace) {
++                    return value;
++                }
++
++                <?php if ($block->stripStaticContentVersion()): ?>
++                value.stacktrace.frames.map(function (frame) {
++                    frame.filename = frame.filename.replace(/version[0-9]{10}\//, '');
++                    return frame;
++                });
++                <?php endif; ?>
++
++                <?php if ($block->stripStoreCode()): ?>
++                value.stacktrace.frames.map(function (frame) {
++                    <?php // phpcs:disable Generic.Files.LineLength ?>
++                    frame.filename = frame.filename.replace('/<?= $block->escapeHtml($block->getStoreCode()); ?>/', '/');
++                    <?php // phpcs:enable Generic.Files.LineLength ?>
++                    return frame;
++                });
++                <?php endif; ?>
++
++                return value;
++            });
++            return event;
++        }
++    <?php endif; ?>
+     });
+ </script>
+
+@@ -35,27 +96,59 @@ if (!$block->canUseScriptTag($block->getNameInLayout())) {
+
+         <?php if ($block->useLogRocketIdentify()): ?>
+
+-        const logRocketCustomerLoaded = function (event) {
++        define('customerData',
++            ['jquery', 'Magento_Customer/js/customer-data'],
++            function ($, customerData) {
++                'use strict';
+
+-            const sectionData = event.detail.data;
++                var getCustomerInfo = function () {
++                    var customer = customerData.get('customer');
++
++                    return customer();
++                };
++
++                var isLoggedIn = function (customerInfo) {
++                    return customerInfo && customerInfo.firstname;
++                };
++
++                return function () {
++                    var deferred = $.Deferred();
++                    var customerInfo = getCustomerInfo();
++
++                    if (customerInfo && customerInfo.data_id) {
++                        deferred.resolve(isLoggedIn(customerInfo), customerInfo);
++                    } else {
++                        customerData.reload(['customer'], false)
++                            .done(function () {
++                                customerInfo = getCustomerInfo()
++                                deferred.resolve(isLoggedIn(customerInfo), customerInfo);
++                            })
++                            .fail(function () {
++                                deferred.reject();
++                            });
++                    }
++
++                    return deferred;
++                };
+
+-            if (!sectionData) {
+-                return; // no section data
+-            }
+-            const customer = sectionData.customer;
+-            if (!customer || !customer.firstname ){
+-                return; // not logged in
+             }
++        );
+
+-            LogRocket.identify(customer.websiteId, {
+-                name: customer.fullname,
+-                email: customer.email
+-            });
++        require(["customerData"], function (customerData) {
+
+-            window.removeEventListener("private-content-loaded", logRocketCustomerLoaded);
+-        }
++            customerData().then(function (loggedIn, data) {
++                if (!loggedIn) {
++                    return;
++                }
++
++                LogRocket.identify(data.websiteId, {
++                    name: data.fullname,
++                    email: data.email
++                });
++
++            });
++        });
+
+-        window.addEventListener("private-content-loaded", logRocketCustomerLoaded);
+
+         <?php endif; ?>
+     </script>
